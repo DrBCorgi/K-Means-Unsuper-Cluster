@@ -1,0 +1,87 @@
+import tkinter as tk
+from tkinter import filedialog
+import pandas as pd
+from transformers import AutoTokenizer, AutoModel
+import torch
+from sklearn.cluster import KMeans
+import numpy as np
+from sklearn.metrics import silhouette_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+import openpyxl
+
+def encode(texts):
+    text_inputs = [text for text in texts]
+    encoded_input = tokenizer(text_inputs, padding=True, truncation=True, return_tensors='pt', max_length=512)
+    with torch.no_grad():
+        model_output = model(**encoded_input)
+    return model_output.last_hidden_state[:, 0, :].numpy()
+
+def extract_key_terms(df, labels, n_terms=5):
+    vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+    X = vectorizer.fit_transform(df['comments'])
+    terms = vectorizer.get_feature_names_out()
+    sorted_terms = []
+    for i in np.unique(labels):
+        indices = np.where(labels == i)[0]
+        X_cluster = X[indices]
+        if X_cluster.shape[0] == 0:
+            sorted_terms.append(f"Cluster {i + 1}: No data")
+            continue
+        mean_tfidf = np.mean(X_cluster, axis=0)
+        if isinstance(mean_tfidf, np.matrix):
+            mean_tfidf = mean_tfidf.A1  # Convert matrix to flat array if necessary
+        sorted_indices = np.argsort(mean_tfidf)[::-1]
+        best_terms = ", ".join(terms[sorted_indices[:n_terms]])
+        sorted_terms.append(f"Cluster {i + 1}: {best_terms}")
+    return sorted_terms
+
+def perform_clustering():
+    root = tk.Tk()
+    root.withdraw()
+    print("Please select the Excel file through the file dialog.")
+    excel_file = filedialog.askopenfilename(title="Select the Excel file", filetypes=[("Excel files", "*.xlsx")])
+
+    df = pd.read_excel(excel_file, engine='openpyxl')
+    df = df.rename(columns={df.columns[0]: 'comments'})
+    df = df.dropna(subset=['comments'])
+    texts = df['comments'].tolist()
+
+    global tokenizer, model
+    tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
+    model = AutoModel.from_pretrained('distilbert-base-uncased')
+    embeddings = encode(texts)
+
+    K = range(4, 11)
+    silhouette_scores = []
+    for n_clusters in K:
+        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+        labels = kmeans.fit_predict(embeddings)
+        silhouette_score_value = silhouette_score(embeddings, labels)
+        silhouette_scores.append(silhouette_score_value)
+        print(f"Cluster {n_clusters}: Silhouette Score = {silhouette_score_value:.3f}")
+
+    optimal_n_clusters = K[silhouette_scores.index(max(silhouette_scores))] + 1
+    print("\\nOptimal number of clusters: {optimal_n_clusters}")
+    print("Highest Silhouette Score: {max(silhouette_scores):.3f}")
+
+    kmeans = KMeans(n_clusters=optimal_n_clusters, n_init=10, random_state=42)
+    labels = kmeans.fit_predict(embeddings)
+
+    cluster_names = extract_key_terms(df, labels)
+    cluster_counts = np.bincount(labels, minlength=len(cluster_names))
+
+    print("Cluster Names:", cluster_names)
+    print("Cluster Counts:", cluster_counts)
+
+    df['Cluster'] = [cluster_names[label] if label < len(cluster_names) else 'Unknown' for label in labels]
+
+    save_location = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")], title="Save the results file")
+
+    with pd.ExcelWriter(save_location, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Cluster Data')
+        summary_df = pd.DataFrame({'Cluster Name': cluster_names, 'Count': cluster_counts})
+        summary_df.to_excel(writer, index=False, sheet_name='Cluster Summary')
+
+    print("Results saved successfully!")
+
+perform_clustering()
